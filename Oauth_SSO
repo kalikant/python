@@ -1,0 +1,113 @@
+import os
+import random
+import string
+import secrets
+import urllib.parse
+from fastapi import FastAPI, Request, Depends, HTTPException
+from fastapi.responses import RedirectResponse
+from fastapi.security import OAuth2PasswordBearer
+from oauthlib.oauth2 import WebApplicationClient
+import httpx
+
+app = FastAPI()
+
+# Configuration
+CLIENT_ID = "YOUR_OAUTH_CLIENT_ID"
+CLIENT_SECRET = "YOUR_OAUTH_CLIENT_SECRET"
+OAUTH_PROVIDER_AUTHORIZATION_URL = "OAUTH_PROVIDER_AUTHORIZATION_URL"
+OAUTH_PROVIDER_TOKEN_URL = "OAUTH_PROVIDER_TOKEN_URL"
+OAUTH_PROVIDER_USERINFO_URL = "OAUTH_PROVIDER_USERINFO_URL"
+REDIRECT_URI = "http://localhost:8000/login/callback"
+SECRET_KEY = ''.join(secrets.choice(string.ascii_letters + string.digits) for i in range(32))
+
+# OAuth 2.0 client setup
+client = WebApplicationClient(CLIENT_ID)
+
+# Dependency to get the current user (using OAuth 2.0 access token)
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+def get_redirect_uri():
+    return REDIRECT_URI
+
+
+def get_authorization_url(redirect_uri):
+    auth_url = client.prepare_request_uri(
+        OAUTH_PROVIDER_AUTHORIZATION_URL,
+        redirect_uri=redirect_uri,
+        scope=["openid", "profile", "email"],
+        state=generate_state(),
+    )
+    return auth_url
+
+
+def generate_state():
+    return "".join(random.choices(string.ascii_letters + string.digits, k=32))
+
+
+@app.get("/login/")
+async def login():
+    redirect_uri = get_redirect_uri()
+    authorization_url = get_authorization_url(redirect_uri)
+    return RedirectResponse(authorization_url)
+
+
+@app.get("/login/callback")
+async def login_callback(request: Request, code: str = None, state: str = None):
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing 'code' parameter")
+
+    if state != request.query_params.get("state"):
+        raise HTTPException(status_code=400, detail="Invalid state parameter")
+
+    token_url = OAUTH_PROVIDER_TOKEN_URL
+    token_params = {
+        "code": code,
+        "redirect_uri": get_redirect_uri(),
+        "grant_type": "authorization_code",
+    }
+
+    async with httpx.AsyncClient() as client:
+        token_response = await client.post(
+            token_url,
+            data=token_params,
+            auth=(CLIENT_ID, CLIENT_SECRET),
+        )
+        token_data = token_response.json()
+
+    if "error" in token_data:
+        raise HTTPException(status_code=400, detail=f"Error in token response: {token_data['error']}")
+
+    access_token = token_data.get("access_token")
+
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Access token not found in token response")
+
+    user_info_url = OAUTH_PROVIDER_USERINFO_URL
+
+    async with httpx.AsyncClient() as client:
+        user_info_response = await client.get(
+            user_info_url,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        user_info_data = user_info_response.json()
+
+    if "error" in user_info_data:
+        raise HTTPException(status_code=400, detail=f"Error in user info response: {user_info_data['error']}")
+
+    # You can process user_info_data here, such as creating or retrieving a user in your database
+    # and generating a JWT token for authentication.
+
+    return {"message": "Login successful!"}
+
+
+# Dependency to get the current user (using OAuth 2.0 access token)
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    # You can implement the code here to validate the access token,
+    # retrieve user information, and perform authorization checks.
+    return {"token": token}
+
+
+@app.get("/protected/")
+async def protected_route(user: dict = Depends(get_current_user)):
+    return {"message": "This route is protected!", "user": user}
